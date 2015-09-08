@@ -21,11 +21,30 @@ const index = "email.html"
 
 const html = `<html>
 <body>
+	<head>
+		<script>
+			function toggleHeaders() {
+				var e = document.getElementById("headers-all")
+				e.style.display = (e.style.display == 'none') ? 'block' : 'none';
+			}
+		</script>
+	</head>
+
 	<div>
 		Date: {{.Date}}<br>
 		From: {{.From}}<br>
 		To: {{.To}}<br>
 		Subject: {{.Subject}}<br>
+	</div>
+
+	<a onclick="toggleHeaders()" href="#">Toggle all headers</a><br><br>
+
+	<div id="headers-all" style="display: none">
+		{{range $key, $val := .Headers}}
+		{{range $v := $val}}
+		{{$key}}: {{$v}}<br>
+		{{end}}
+		{{end}}
 	</div>
 
 	{{if .Html}}
@@ -59,6 +78,7 @@ type Email struct {
 	From        string
 	To          string
 	Subject     string
+	Headers     map[string][]string
 	Html        *Attachment
 	Text        string
 	Attachments []Attachment
@@ -105,11 +125,25 @@ func main() {
 		panic(err)
 	}
 
+	// decode headers
+	headers := make(map[string][]string)
+	for k, values := range msg.Header {
+		headers[k] = make([]string, len(values))
+
+		for i, v := range values {
+			headers[k][i], err = decodeRFC2047Word(v)
+			if err != nil {
+				panic(err)
+			}
+		}
+	}
+
 	email := Email{
 		Date:    msg.Header.Get("Date"),
 		From:    from,
 		To:      to,
 		Subject: subject,
+		Headers: headers,
 	}
 
 	if strings.HasPrefix(mediaType, "multipart/") {
