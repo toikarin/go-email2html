@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/base64"
+	"errors"
 	"flag"
+	"fmt"
 	"html/template"
 	"io"
 	"io/ioutil"
@@ -94,35 +96,42 @@ func main() {
 	flag.Parse()
 
 	if *outputdir == "" {
-		panic("dir not set")
+		fmt.Println("dir not set")
+		os.Exit(1)
 	}
 
 	// Read from stdin
-	reader := bufio.NewReader(os.Stdin)
+	err := handleMessage(bufio.NewReader(os.Stdin), *outputdir)
+	if err != nil {
+		fmt.Printf("Fatal error: %s\n", err)
+		os.Exit(1)
+	}
+}
 
+func handleMessage(reader io.Reader, outputdir string) error {
 	msg, err := mail.ReadMessage(reader)
 	if err != nil {
-		panic(err)
+		return err
 	}
 
 	mediaType, params, err := mime.ParseMediaType(msg.Header.Get("Content-Type"))
 	if err != nil {
-		panic(err)
+		return err
 	}
 
 	from, err := decodeRFC2047Word(msg.Header.Get("From"))
 	if err != nil {
-		panic(err)
+		return err
 	}
 
 	to, err := decodeRFC2047Word(msg.Header.Get("To"))
 	if err != nil {
-		panic(err)
+		return err
 	}
 
 	subject, err := decodeRFC2047Word(msg.Header.Get("Subject"))
 	if err != nil {
-		panic(err)
+		return err
 	}
 
 	// decode headers
@@ -133,7 +142,7 @@ func main() {
 		for i, v := range values {
 			headers[k][i], err = decodeRFC2047Word(v)
 			if err != nil {
-				panic(err)
+				return err
 			}
 		}
 	}
@@ -147,12 +156,16 @@ func main() {
 	}
 
 	if strings.HasPrefix(mediaType, "multipart/") {
-		handleMultipart(&email, msg.Body, params["boundary"])
+		if err := handleMultipart(&email, msg.Body, params["boundary"]); err != nil {
+			return err
+		}
 	} else {
-		addContent(&email, msg.Header, msg.Body)
+		if err := addContent(&email, msg.Header, msg.Body); err != nil {
+			return err
+		}
 	}
 
-	writeResult(&email, *outputdir)
+	return writeResult(&email, outputdir)
 }
 
 type Header interface {
@@ -171,7 +184,7 @@ func isMultipart(contentType string) bool {
 	return strings.HasPrefix(contentType, "multipart/")
 }
 
-func handleMultipart(email *Email, r io.Reader, boundary string) {
+func handleMultipart(email *Email, r io.Reader, boundary string) error {
 	reader := multipart.NewReader(r, boundary)
 
 	for {
@@ -181,11 +194,15 @@ func handleMultipart(email *Email, r io.Reader, boundary string) {
 		}
 
 		if err != nil {
-			panic(err)
+			return err
 		}
 
-		addContent(email, part.Header, part)
+		if err := addContent(email, part.Header, part); err != nil {
+			return err
+		}
 	}
+
+	return nil
 }
 
 type charsetError string
@@ -215,19 +232,19 @@ func decodeRFC2047Word(s string) (string, error) {
 	return s, nil
 }
 
-func addContent(email *Email, header Header, r io.Reader) {
+func addContent(email *Email, header Header, r io.Reader) error {
 	if header.Get("Content-Transfer-Encoding") == "quoted-printable" {
 		r = quotedprintable.NewReader(r)
 	}
 
 	data, err := ioutil.ReadAll(r)
 	if err != nil {
-		panic(err)
+		return err
 	}
 
 	mediaType, params, err := mime.ParseMediaType(header.Get("Content-Type"))
 	if err != nil {
-		panic(err)
+		return err
 	}
 
 	if isPlainText(mediaType) && email.Text == "" {
@@ -237,7 +254,9 @@ func addContent(email *Email, header Header, r io.Reader) {
 		html := string(data)
 		email.Html = &Attachment{Data: []byte(html), Filename: "email-content.html"}
 	} else if isMultipart(mediaType) {
-		handleMultipart(email, bytes.NewReader(data), params["boundary"])
+		if err := handleMultipart(email, bytes.NewReader(data), params["boundary"]); err != nil {
+			return err
+		}
 	} else {
 		var attachmentData []byte
 
@@ -246,7 +265,7 @@ func addContent(email *Email, header Header, r io.Reader) {
 			var err error
 			attachmentData, err = base64.StdEncoding.DecodeString(string(data))
 			if err != nil {
-				panic(err)
+				return err
 			}
 		} else {
 			attachmentData = data
@@ -260,12 +279,14 @@ func addContent(email *Email, header Header, r io.Reader) {
 			} else if isHtml(mediaType) {
 				filename = "attachment.html"
 			} else {
-				panic("don't know how to generate filename for " + mediaType)
+				return errors.New("don't know how to generate filename for " + mediaType)
 			}
 		}
 
 		email.Attachments = append(email.Attachments, Attachment{Data: attachmentData, Filename: filename})
 	}
+
+	return nil
 }
 
 func getFilename(contentDisposition string) string {
@@ -282,59 +303,73 @@ func getFilename(contentDisposition string) string {
 	return strings.Trim(filename[1], "\"")
 }
 
-func writeResult(email *Email, outputdir string) {
+func writeResult(email *Email, outputdir string) error {
 	// remove old directory
-	err := os.RemoveAll(outputdir)
-	if err != nil {
-		panic(err)
+	if err := os.RemoveAll(outputdir); err != nil {
+		return err
 	}
 
 	// (re)create directory
-	err = os.Mkdir(outputdir, 0755)
-	if err != nil {
-		panic(err)
+	if err := os.Mkdir(outputdir, 0755); err != nil {
+		return err
 	}
 
 	// change mode to 0755, mkdir does not set it correctly
 	f, err := os.Open(outputdir)
 	if err != nil {
-		panic(err)
+		return err
 	}
 
 	defer f.Close()
 
-	f.Chmod(0755)
+	if err := f.Chmod(0755); err != nil {
+		return err
+	}
 
 	// write template
 	t := template.Must(template.New("html").Parse(html))
 	f, err = os.Create(filepath.Join(outputdir, index))
 	if err != nil {
-		panic(err)
+		return err
 	}
 
 	defer f.Close()
 
-	t.Execute(f, email)
-	f.Chmod(0660)
+	if err := t.Execute(f, email); err != nil {
+		return err
+	}
+
+	if err := f.Chmod(0660); err != nil {
+		return err
+	}
 
 	// write attachments
 	if email.Html != nil {
-		write(*email.Html, outputdir)
+		if err := write(*email.Html, outputdir); err != nil {
+			return err
+		}
 	}
 
 	for _, attachment := range email.Attachments {
-		write(attachment, outputdir)
+		if err := write(attachment, outputdir); err != nil {
+			return err
+		}
 	}
+
+	return nil
 }
 
-func write(attachment Attachment, outputdir string) {
+func write(attachment Attachment, outputdir string) error {
 	f, err := os.Create(filepath.Join(outputdir, attachment.Filename))
 	if err != nil {
-		panic(err)
+		return err
 	}
 
 	defer f.Close()
 
-	f.Write(attachment.Data)
-	f.Chmod(0660)
+	if _, err = f.Write(attachment.Data); err != nil {
+		return err
+	}
+
+	return f.Chmod(0660)
 }
