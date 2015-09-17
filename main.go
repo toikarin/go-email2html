@@ -233,8 +233,11 @@ func decodeRFC2047Word(s string) (string, error) {
 }
 
 func addContent(email *Email, header Header, r io.Reader) error {
-	if header.Get("Content-Transfer-Encoding") == "quoted-printable" {
+	switch header.Get("Content-Transfer-Encoding") {
+	case "quoted-printable":
 		r = quotedprintable.NewReader(r)
+	case "base64":
+		r = base64.NewDecoder(base64.StdEncoding, r)
 	}
 
 	data, err := ioutil.ReadAll(r)
@@ -258,19 +261,6 @@ func addContent(email *Email, header Header, r io.Reader) error {
 			return err
 		}
 	} else {
-		var attachmentData []byte
-
-		// check for byte64 encoding
-		if header.Get("Content-Transfer-Encoding") == "base64" {
-			var err error
-			attachmentData, err = base64.StdEncoding.DecodeString(string(data))
-			if err != nil {
-				return err
-			}
-		} else {
-			attachmentData = data
-		}
-
 		// figure out filename
 		filename := getFilename(header.Get("Content-Disposition"))
 		if filename == "" {
@@ -283,7 +273,7 @@ func addContent(email *Email, header Header, r io.Reader) error {
 			}
 		}
 
-		email.Attachments = append(email.Attachments, Attachment{Data: attachmentData, Filename: filename})
+		email.Attachments = append(email.Attachments, Attachment{Data: data, Filename: filename})
 	}
 
 	return nil
